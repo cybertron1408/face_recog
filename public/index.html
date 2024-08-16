@@ -1,0 +1,444 @@
+<!-- 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition Attendance System</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.0.1/dist/face-api.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        h1 {
+            text-align: center;
+        }
+        .container {
+            display: flex;
+            justify-content: center;
+            margin: 20px;
+        }
+        .section {
+            margin: 10px;
+        }
+        video, canvas {
+            display: block;
+            margin: 10px auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Employee Face Recognition System</h1>
+
+    <div class="container">
+        <div class="section">
+            <h2>Register Employee</h2>
+            <input type="file" id="registerImage" accept="image/*">
+            <button id="registerButton">Register</button>
+            <canvas id="registerCanvas" style="display: none;"></canvas>
+        </div>
+
+        <div class="section">
+            <h2>Live Video Attendance</h2>
+            <video id="videoInput" autoplay muted width="640" height="480"></video>
+            <button id="startVideoButton">Start Video</button>
+            <button id="markAttendanceButton">Start Attendance</button>
+            <canvas id="overlayCanvas" width="640" height="480"></canvas>
+            <div id="attendanceResult"></div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const registerImage = document.getElementById('registerImage');
+            const registerCanvas = document.getElementById('registerCanvas');
+            const registerButton = document.getElementById('registerButton');
+            const videoInput = document.getElementById('videoInput');
+            const overlayCanvas = document.getElementById('overlayCanvas');
+            const startVideoButton = document.getElementById('startVideoButton');
+            const markAttendanceButton = document.getElementById('markAttendanceButton');
+            const attendanceResult = document.getElementById('attendanceResult');
+            let labeledFaceDescriptors = [];
+            let attendanceInterval;
+            let recognizedEmployee = false;
+
+            // Load face-api.js models
+            async function loadModels() {
+                try {
+                    await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+                    await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+                    await faceapi.nets.faceRecognitionNet.loadFromUri('/models');
+
+                    const response = await fetch('/get-employee-descriptors');
+                    const descriptors = await response.json();
+
+                    // Convert descriptors into Float32Array
+                    labeledFaceDescriptors = descriptors.map(d => {
+                        const label = d.label;
+                        const descriptorsArray = d.descriptors.map(desc => new Float32Array(desc));
+                        return new faceapi.LabeledFaceDescriptors(label, descriptorsArray);
+                    });
+
+                    console.log('Models loaded and employee descriptors fetched');
+                } catch (error) {
+                    console.error('Error loading models or fetching descriptors:', error);
+                }
+            }
+
+            // Register new employee
+            async function registerEmployee() {
+                try {
+                    const imageFile = registerImage.files[0];
+                    if (!imageFile) {
+                        alert('Please upload an image');
+                        return;
+                    }
+
+                    const image = await faceapi.bufferToImage(imageFile);
+                    const detections = await faceapi.detectAllFaces(image).withFaceLandmarks().withFaceDescriptors();
+
+                    if (detections.length === 0) {
+                        alert('No face detected');
+                        return;
+                    }
+
+                    const descriptors = detections.map(d => d.descriptor);
+                    const employeeId = prompt('Enter Employee ID:');
+
+                    const response = await fetch('/save-employee', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            employeeId,
+                            descriptors: descriptors.map(d => Array.from(d))
+                        })
+                    });
+
+                    if (response.ok) {
+                        alert('Employee registered successfully');
+                    } else {
+                        alert('Failed to register employee');
+                    }
+                } catch (error) {
+                    console.error('Error registering employee:', error);
+                }
+            }
+
+            // Start video feed from webcam
+            function startVideo() {
+                navigator.mediaDevices.getUserMedia({ video: {} })
+                    .then(stream => {
+                        videoInput.srcObject = stream;
+                        console.log('Video stream started');
+                    })
+                    .catch(err => {
+                        console.error('Error accessing webcam:', err);
+                    });
+            }
+
+            // Stop video feed
+            function stopVideo() {
+                const stream = videoInput.srcObject;
+                if (stream) {
+                    const tracks = stream.getTracks();
+                    tracks.forEach(track => track.stop());
+                    videoInput.srcObject = null;
+                }
+            }
+
+            // Detect faces and recognize them
+            async function detectAndRecognize() {
+                try {
+                    const detections = await faceapi.detectAllFaces(videoInput).withFaceLandmarks().withFaceDescriptors();
+                    const resizedDetections = faceapi.resizeResults(detections, { width: videoInput.width, height: videoInput.height });
+
+                    overlayCanvas.width = videoInput.width;
+                    overlayCanvas.height = videoInput.height;
+                    const ctx = overlayCanvas.getContext('2d');
+                    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+                    faceapi.draw.drawDetections(overlayCanvas, resizedDetections);
+                    faceapi.draw.drawFaceLandmarks(overlayCanvas, resizedDetections);
+
+                    if (labeledFaceDescriptors.length > 0) {
+                        const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.6);
+                        const results = resizedDetections.map(d => faceMatcher.findBestMatch(d.descriptor));
+                        results.forEach((result, i) => {
+                            const box = resizedDetections[i].detection.box;
+                            const drawBox = new faceapi.draw.DrawBox(box, { label: result.toString() });
+                            drawBox.draw(overlayCanvas);
+                        });
+
+                        attendanceResult.innerHTML = '<pre>' + JSON.stringify(results, null, 2) + '</pre>';
+                        const match = results.find(r => r.label !== 'unknown');
+                        if (match && !recognizedEmployee) {
+                            recognizedEmployee = true;
+                            await new Promise(resolve => {
+                                alert('Employee Face is Recognized');
+                                resolve();
+                            });
+
+                            clearInterval(attendanceInterval);
+                            stopVideo();
+                            const response = await fetch('/mark-attendance', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    employeeId: match.label
+                                })
+                            });
+
+                            if (response.ok) {
+                                alert('Attendance marked');
+                            } else {
+                                alert('Failed to mark attendance');
+                            }
+                            markAttendanceButton.innerText = 'Start Attendance'; // Change button text after marking attendance
+                            recognizedEmployee = false; // Reset the flag for next recognition
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error during face detection and recognition:', error);
+                }
+            }
+
+            // Event listeners
+            registerButton.addEventListener('click', registerEmployee);
+            startVideoButton.addEventListener('click', startVideo);
+            markAttendanceButton.addEventListener('click', () => {
+                if (markAttendanceButton.innerText === 'Start Attendance') {
+                    recognizedEmployee = false;
+                    markAttendanceButton.innerText = 'Stop Attendance';
+                    attendanceInterval = setInterval(detectAndRecognize, 1000); // Check every second
+                } else {
+                    markAttendanceButton.innerText = 'Start Attendance';
+                    clearInterval(attendanceInterval);
+                    stopVideo();
+                }
+            });
+
+            await loadModels(); // Load models when the document is ready
+        });
+    </script>
+</body>
+</html> -->
+
+
+<!-- ============================================================================================================ -->
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition Attendance System</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.0.1/dist/face-api.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        h1 {
+            text-align: center;
+        }
+        .container {
+            display: flex;
+            justify-content: center;
+            margin: 20px;
+        }
+        .section {
+            margin: 10px;
+        }
+        img, canvas {
+            display: block;
+            margin: 10px auto;
+        }
+        /* Loader styles */
+        .loader {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            border: 16px solid #f3f3f3;
+            border-top: 16px solid #3498db;
+            border-radius: 50%;
+            width: 120px;
+            height: 120px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Employee Face Recognition System</h1>
+
+    <div class="container">
+        <div class="section">
+            <h2>Register Employee</h2>
+            <input type="file" id="registerImage" accept="image/*">
+            <button id="registerButton">Register</button>
+        </div>
+
+        <div class="section">
+            <h2>Check Attendance</h2>
+            <input type="file" id="uploadImage" accept="image/*">
+            <button id="checkAttendanceButton">Check Attendance</button>
+            <div id="attendanceResult"></div>
+        </div>
+    </div>
+
+    <div id="loader" class="loader"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const registerImage = document.getElementById('registerImage');
+            const registerButton = document.getElementById('registerButton');
+            const uploadImage = document.getElementById('uploadImage');
+            const checkAttendanceButton = document.getElementById('checkAttendanceButton');
+            const attendanceResult = document.getElementById('attendanceResult');
+            const loader = document.getElementById('loader');
+            let labeledFaceDescriptors = [];
+
+            // Load face-api.js models
+            async function loadModels() {
+                try {
+                    await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+                    await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+                    await faceapi.nets.faceRecognitionNet.loadFromUri('/models');
+
+                    const response = await fetch('/get-employee-descriptors');
+                    const descriptors = await response.json();
+
+                    labeledFaceDescriptors = descriptors.map(d => {
+                        const label = d.label;
+                        const descriptorsArray = d.descriptors.map(desc => new Float32Array(desc));
+                        return new faceapi.LabeledFaceDescriptors(label, descriptorsArray);
+                    });
+
+                    console.log('Models loaded and employee descriptors fetched');
+                } catch (error) {
+                    console.error('Error loading models or fetching descriptors:', error);
+                }
+            }
+
+            // Register new employee
+            async function registerEmployee() {
+                try {
+                    const imageFile = registerImage.files[0];
+                    if (!imageFile) {
+                        alert('Please upload an image');
+                        return;
+                    }
+
+                    const image = await faceapi.bufferToImage(imageFile);
+                    const detections = await faceapi.detectAllFaces(image).withFaceLandmarks().withFaceDescriptors();
+
+                    if (detections.length === 0) {
+                        alert('No face detected');
+                        return;
+                    }
+
+                    const descriptors = detections.map(d => d.descriptor);
+                    const employeeId = prompt('Enter Employee ID:');
+
+                    const response = await fetch('/save-employee', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            employeeId,
+                            descriptors: descriptors.map(d => Array.from(d))
+                        })
+                    });
+
+                    if (response.ok) {
+                        alert('Employee registered successfully');
+                        await loadModels(); // Reload models to include newly registered employee
+                    } else {
+                        alert('Failed to register employee');
+                    }
+                } catch (error) {
+                    console.error('Error registering employee:', error);
+                }
+            }
+
+            // Check attendance
+            async function checkAttendance() {
+                try {
+                    if (labeledFaceDescriptors.length === 0) {
+                        alert('No registered employees found.');
+                        return;
+                    }
+
+                    const imageFile = uploadImage.files[0];
+                    if (!imageFile) {
+                        alert('Please upload an image');
+                        return;
+                    }
+
+                    // Show the loader
+                    loader.style.display = 'block';
+
+                    const image = await faceapi.bufferToImage(imageFile);
+                    const detections = await faceapi.detectAllFaces(image).withFaceLandmarks().withFaceDescriptors();
+
+                    if (detections.length === 0) {
+                        alert('No face detected');
+                        loader.style.display = 'none'; // Hide the loader
+                        return;
+                    }
+
+                    const descriptor = detections[0].descriptor;
+                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.6);
+                    const result = faceMatcher.findBestMatch(descriptor);
+
+                    loader.style.display = 'none'; // Hide the loader
+                    uploadImage.value = ''; // Clear the file input
+                    
+                    if (result.label !== 'unknown') {
+                        alert('Employee Face is Recognized');
+                        const response = await fetch('/mark-attendance', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                employeeId: result.label
+                            })
+                        });
+
+                        if (response.ok) {
+                            alert('Attendance marked');
+                        } else {
+                            alert('Failed to mark attendance');
+                        }
+                    } else {
+                        alert('Employee Face is Not Recognized');
+                    }
+                } catch (error) {
+                    console.error('Error during face recognition:', error);
+                    loader.style.display = 'none'; // Hide the loader in case of error
+                }
+            }
+
+            // Event listeners
+            registerButton.addEventListener('click', registerEmployee);
+            checkAttendanceButton.addEventListener('click', checkAttendance);
+
+            await loadModels(); // Load models when the document is ready
+        });
+    </script>
+</body>
+</html>
+
+
+
